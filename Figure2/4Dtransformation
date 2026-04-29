@@ -1,0 +1,223 @@
+import numpy as np
+import trimesh
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from scipy.spatial import Delaunay
+from matplotlib.animation import FuncAnimation
+import glob
+
+def alpha_shape(points, alpha):
+    tri = Delaunay(points)
+    triangles = points[tri.vertices]
+    a = ((tri.points[tri.vertices][:, 0, :] - tri.points[tri.vertices][:, 1, :])**2).sum(axis=1)
+    b = ((tri.points[tri.vertices][:, 1, :] - tri.points[tri.vertices][:, 2, :])**2).sum(axis=1)
+    c = ((tri.points[tri.vertices][:, 2, :] - tri.points[tri.vertices][:, 0, :])**2).sum(axis=1)
+    s = (a + b + c) / 2.0
+    areas = (s * (s - a) * (s - b) * (s - c))**0.5
+    circums = a * b * c / (4.0 * areas)
+    filtered = triangles[circums < (1.0 / alpha)]
+    edge1 = filtered[:, (0, 1)]
+    edge2 = filtered[:, (1, 2)]
+    edge3 = filtered[:, (2, 0)]
+    edge_points = np.unique(np.concatenate((edge1, edge2, edge3)), axis=0)
+    return edge_points
+
+
+def generate_alpha_mesh(average_intersections, alpha=1.0):
+    if len(average_intersections) < 4:
+        raise ValueError("At least 4 points are required to create a mesh")
+
+    tri = Delaunay(average_intersections)
+    new_faces = tri.simplices
+    new_mesh = trimesh.Trimesh(vertices=average_intersections, faces=new_faces)
+
+    return new_mesh
+
+def save_mesh_to_stl(mesh, file_path):
+    mesh.export(file_path, file_type='stl')
+
+
+def load_mesh(file_path):
+    return trimesh.load_mesh(file_path)
+
+def adjust_z(mesh):
+    min_z = np.min(mesh.vertices[:, 2])
+    mesh.vertices[:, 2] -= min_z
+
+def align_centroids_xy_only(mesh1, mesh2):
+    centroid1 = mesh1.centroid
+    centroid2 = mesh2.centroid
+    offset = centroid1 - centroid2
+    offset[2] = 0
+    mesh2.vertices += offset
+
+def calculate_section_area(mesh, z_value):
+    section = mesh.section(plane_origin=[0, 0, z_value], plane_normal=[0, 0, 1])
+    
+    if section is None:
+        return 0
+
+    polygon_2D, _ = section.to_planar()
+    area = polygon_2D.area
+    return area
+
+
+def generate_rays(centroid, num_rays=10000):
+    centroid[2] = 2  # 座標Z=2に重心を設定半球状に放射線を引く
+    num_points = int(np.sqrt(num_rays))
+    theta = np.linspace(0, np.pi / 1, num_points)  # ここの1を2にすると半球状に放射線を引く
+    phi = np.linspace(0, 2 * np.pi, num_points)
+    theta, phi = np.meshgrid(theta, phi)
+    x = np.sin(theta) * np.cos(phi)
+    y = np.sin(theta) * np.sin(phi)
+    z = np.cos(theta)
+    rays = np.vstack((x.flatten(), y.flatten(), z.flatten())).T
+    return rays
+
+
+
+
+def find_intersections(mesh1, mesh2, rays, origin):
+    origin = np.tile(np.array(origin), (rays.shape[0], 1))
+    rays = np.array(rays).reshape(-1, 3)
+
+    intersections1, index_ray1, _ = mesh1.ray.intersects_location(origin, rays)
+    intersections2, index_ray2, _ = mesh2.ray.intersects_location(origin, rays)
+
+    return intersections1, index_ray1, intersections2, index_ray2
+
+def calculate_percentile_intersections(intersections1, index_ray1, intersections2, index_ray2, percentiles):
+    percentile_intersections = {p: [] for p in percentiles}
+
+    unique_indices, inverse_indices = np.unique(np.concatenate((index_ray1, index_ray2)), return_inverse=True)
+    count_indices = np.bincount(inverse_indices)
+
+    matching_indices = unique_indices[count_indices == 2]
+
+    for idx in matching_indices:
+        i1 = np.where(index_ray1 == idx)[0][0]
+        i2 = np.where(index_ray2 == idx)[0][0]
+
+        for p in percentiles:
+            percentile_intersection = intersections1[i1] + (intersections2[i2] - intersections1[i1]) * p / 100
+            percentile_intersections[p].append(percentile_intersection)
+
+    for p in percentiles:
+        percentile_intersections[p] = np.array(percentile_intersections[p])
+
+    return percentile_intersections
+
+
+def calculate_average_intersections(intersections1, index_ray1, intersections2, index_ray2):
+    average_intersections = []
+
+    unique_indices, inverse_indices = np.unique(np.concatenate((index_ray1, index_ray2)), return_inverse=True)
+    count_indices = np.bincount(inverse_indices)
+
+    matching_indices = unique_indices[count_indices == 2]
+
+    for idx in matching_indices:
+        i1 = np.where(index_ray1 == idx)[0][0]
+        i2 = np.where(index_ray2 == idx)[0][0]
+        avg_intersection = (intersections1[i1] + intersections2[i2]) / 2
+        average_intersections.append(avg_intersection)
+
+    return np.array(average_intersections)
+
+
+def show_animation(mesh1, mesh2, mesh3, origin, animation_frames):
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+
+    def init():
+        ax.scatter(mesh1.vertices[:, 0], mesh1.vertices[:, 1], mesh1.vertices[:, 2], c='lightgray', alpha=0.3, s=5)
+        ax.scatter(mesh2.vertices[:, 0], mesh2.vertices[:, 1], mesh2.vertices[:, 2], c='lightgray', alpha=0.3, s=5)
+
+        return []
+
+    def update(frame):
+        p, intersections = animation_frames[frame]
+
+        scatter_handle, = ax.plot(intersections[:, 0], intersections[:, 1], intersections[:, 2], linestyle="", marker="o", c='gray', markersize=1)
+        ax.set_title(f'Limb regeneration in Ambystoma mexicanum')
+
+        return [scatter_handle]
+
+
+    ani = FuncAnimation(fig, update, frames=len(animation_frames), init_func=init, blit=True, interval=10)
+
+    mesh1_bbox = mesh1.bounding_box.bounds
+    mesh2_bbox = mesh2.bounding_box.bounds
+    x_min = min(mesh1_bbox[0][0], mesh2_bbox[0][0])
+    x_max = max(mesh1_bbox[1][0], mesh2_bbox[1][0])
+    y_min = min(mesh1_bbox[0][1], mesh2_bbox[0][1])
+    y_max = max(mesh1_bbox[1][1], mesh2_bbox[1][1])
+    z_min = min(mesh1_bbox[0][2], mesh2_bbox[0][2])
+    z_max = max(mesh1_bbox[1][2], mesh2_bbox[1][2])
+
+    z_extension = 400
+    ax.set_xlim([x_min, x_max])
+    ax.set_ylim([y_min, y_max])
+    ax.set_zlim([z_min, z_max + z_extension])
+
+    # アスペクト比を実寸に設定
+    ax.set_box_aspect([x_max - x_min, y_max - y_min, (z_max + z_extension) - z_min])
+
+    plt.show()
+
+
+# 重心を指定したオリジンに揃えるようにalign_centroids_xy_onlyを変更
+def align_centroids_xy_only(mesh1, mesh2, origin_mesh1):
+    centroid1 = origin_mesh1
+    centroid2 = mesh2.centroid
+    offset = centroid1 - centroid2
+    offset[2] = 0
+    mesh2.vertices += offset
+
+def main(files):
+    animation_frames = []
+    
+    # File1の重心を保存
+    mesh1 = load_mesh(files[0])
+    adjust_z(mesh1)
+    ref_centroid = np.array(mesh1.centroid)
+
+    times = [10, 12, 14, 17, 20, 24]
+    time_intervals = np.diff(times)
+    total_time = np.sum(time_intervals)
+    time_intervals_normalized = time_intervals / total_time
+
+    total_frames = 1000  # アニメーションの総フレーム数を設定
+    file_frames = np.round(time_intervals_normalized * total_frames).astype(int)
+
+    for i in range(len(files) - 1):
+        file1 = files[i]
+        file2 = files[i + 1]
+
+        mesh1 = load_mesh(file1)
+        adjust_z(mesh1)
+        align_centroids_xy_only(mesh1, mesh1, ref_centroid)  # File1の重心に合わせる
+
+        mesh2 = load_mesh(file2)
+        adjust_z(mesh2)
+        align_centroids_xy_only(mesh2, mesh2, ref_centroid)  # File1の重心に合わせる
+
+        origin = np.array(mesh1.centroid)
+        origin[2] = 2
+
+        rays = generate_rays(origin)
+        rays /= np.linalg.norm(rays, axis=1)[:, np.newaxis]
+
+        intersections1, index_ray1, intersections2, index_ray2 = find_intersections(mesh1, mesh2, rays, origin)
+
+        percentiles = np.linspace(0, 100, file_frames[i])
+        percentile_intersections = calculate_percentile_intersections(intersections1, index_ray1, intersections2, index_ray2, percentiles)
+
+        for p, intersections in zip(percentiles, percentile_intersections.values()):
+            animation_frames.append((p, intersections))
+
+    show_animation(mesh1, mesh2, origin, rays, animation_frames)  # add the missing 'rays' argument
+
+if __name__ == "__main__":
+    files = ["file1.stl", "file2.stl", "file3.stl", "file4.stl", "file5.stl", "file6.stl"]
+    main(files)
