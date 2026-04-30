@@ -1,0 +1,99 @@
+import os
+from PIL import Image
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+
+# カレントフォルダ内のJPEGファイルを取得
+image_files = [f for f in os.listdir('.') if f.lower().endswith('.jpg')]
+
+# 画像の保存先フォルダを作成
+output_dir = 'processed_images'
+os.makedirs(output_dir, exist_ok=True)
+
+# 変換後の画像サイズ
+output_size = (1000, 1000)
+
+# 一番初めの画像の面積を保持するための変数
+first_image_area = None
+
+def extract_white_region(image):
+    gray_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    _, white_mask = cv2.threshold(gray_image, 220, 255, cv2.THRESH_BINARY)
+    contours, _ = cv2.findContours(white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return contours, white_mask
+
+def calculate_centroid_and_area(contours):
+    M = cv2.moments(contours[0])
+    if M["m00"] == 0:
+        return None, 0
+    cx = int(M["m10"] / M["m00"])
+    cy = int(M["m01"] / M["m00"])
+    area = M["m00"]
+    return (cx, cy), area
+
+def plot_debug_info(image, centroid):
+    plt.imshow(image)
+    plt.scatter(centroid[0], centroid[1], color='purple', s=100)  # 重心点
+    plt.scatter(output_size[0] // 2, output_size[1] // 2, color='white', s=100)  # 中央点
+    plt.axhline(y=output_size[1] // 2, color='white', linestyle='--')  # 中央の横線
+    plt.axvline(x=output_size[0] // 2, color='white', linestyle='--')  # 中央の縦線
+    plt.xlim(0, output_size[0])
+    plt.ylim(output_size[1], 0)  # y軸を反転
+    plt.title('重心と中央点')
+    plt.axis('off')  # 軸を非表示
+    plt.show()
+
+def calculate_area_from_image(image):
+    contours, _ = extract_white_region(image)
+    if len(contours) > 0:
+        _, area = calculate_centroid_and_area(contours)
+        return area
+    return 0
+
+for idx, image_file in enumerate(image_files):
+    img = Image.open(image_file).convert("RGB")
+    img_np = np.array(img)
+
+    contours, white_mask = extract_white_region(img_np)
+    if len(contours) > 0:
+        centroid, area = calculate_centroid_and_area(contours)
+        if centroid is None:
+            print(f"重心が計算できませんでした: {image_file}")
+            continue
+
+        print(f"{image_file}: 重心 = {centroid}, 面積 = {area}")
+
+        if idx == 0:
+            first_image_area = area
+            print(f"1番目の画像の面積を保持: {first_image_area}")
+
+        if first_image_area is not None and area > 0:
+            scale_factor = np.sqrt(first_image_area / area)
+            new_size = (int(img_np.shape[1] * scale_factor), int(img_np.shape[0] * scale_factor))
+            resized_img = cv2.resize(img_np, new_size, interpolation=cv2.INTER_AREA)
+
+            contours, _ = extract_white_region(resized_img)
+            if len(contours) > 0:
+                resized_centroid, _ = calculate_centroid_and_area(contours)
+                print(f"リサイズ後の重心 = {resized_centroid}")
+
+                # アフィン変換の適用
+                move_x = output_size[0] // 2 - resized_centroid[0]
+                move_y = output_size[1] // 2 - resized_centroid[1]
+                translation_matrix = np.float32([[1, 0, move_x], [0, 1, move_y]])
+                translated_img = cv2.warpAffine(resized_img, translation_matrix, output_size)
+
+                # プロットを表示
+                plot_debug_info(translated_img, (output_size[0] // 2, output_size[1] // 2))
+
+                # リサイズ後の白領域の面積を再計算して出力
+                resized_area = calculate_area_from_image(translated_img)
+                print(f"リサイズ後の白領域の面積: {resized_area}")
+
+                output_image = Image.fromarray(translated_img)
+                output_path = os.path.join(output_dir, f'processed_{idx+1}.jpeg')
+                print(f"画像を保存します: {output_path}")
+                output_image.save(output_path)
+    else:
+        print(f"輪郭が見つかりませんでした: {image_file}")
