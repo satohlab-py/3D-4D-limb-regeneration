@@ -1,0 +1,172 @@
+from pathlib import Path
+import numpy as np
+import matplotlib.pyplot as plt
+import math
+import cv2
+from tifffile import imread, imwrite
+
+num_lines = 2000
+
+def translate_image(image, tx, ty):
+    h, w, _ = image.shape
+    translated_image = np.zeros_like(image)
+    for y in range(h):
+        for x in range(w):
+            new_x = x + tx
+            new_y = y + ty
+            if 0 <= new_x < w and 0 <= new_y < h:
+                translated_image[new_y, new_x] = image[y, x]
+    return translated_image
+
+def plot_colorful_lines(circle_image, color_image, circle_centroid, color_centroid, circle_points, color_points):
+    plt.imshow(circle_image)
+    angles = []
+
+    min_points = min(len(circle_points), len(color_points))
+
+    for i in range(min_points):
+        circle_point = circle_points[i]
+        color_point = color_points[i]
+
+        angle = np.arctan2(circle_point[1] - circle_centroid[1], circle_point[0] - circle_centroid[0])
+        angles.append(angle)
+
+        circle_distance = np.linalg.norm(circle_point - circle_centroid)
+        color_distance = np.linalg.norm(color_point - color_centroid)
+        distance_ratio = circle_distance / color_distance
+        num_line_points = int(distance_ratio * 100)
+
+        x_values = np.linspace(color_centroid[0], color_point[0], num_line_points)
+        y_values = np.linspace(color_centroid[1], color_point[1], num_line_points)
+        color_values = color_image[y_values.astype(int), x_values.astype(int)]
+
+        x_values_circle = np.linspace(circle_centroid[0], circle_point[0], num_line_points)
+        y_values_circle = np.linspace(circle_centroid[1], circle_point[1], num_line_points)
+
+        for j in range(num_line_points):
+            circle_image[int(y_values_circle[j]), int(x_values_circle[j])] = color_values[j]
+
+    plt.imshow(circle_image)
+    plt.gca().invert_yaxis()
+    return circle_image
+
+def angle_sort_key(point, cx, cy):
+    dx, dy = point[0] - cx, point[1] - cy
+    return math.atan2(dy, dx)
+
+def find_intersection_points(image, cx, cy, condition, use_previous=False, max_range=10000):
+    points = []
+    prev_point = None
+    angles = np.linspace(0, 2 * math.pi, num_lines, endpoint=False)
+
+    for angle in angles:
+        x, y = intersection_points(image, cx, cy, angle, condition, max_range)
+        if x is not None and y is not None:
+            points.append([x, y])
+            prev_point = [x, y]
+        elif prev_point is not None and use_previous:
+            points.append(prev_point)
+            prev_point = None
+        else:
+            print(f"No intersection found at angle {angle} for centroid ({cx}, {cy})")
+            continue  # Skip and continue with the next angle
+
+    # If no points were found, return an empty array
+    if len(points) == 0:
+        points = np.array([[cx, cy]], dtype=np.float32)
+    return np.array(points, dtype=np.float32)
+
+
+def in_white(c, threshold=200):
+    r, g, b = c[:3]
+    return r > threshold and g > threshold and b > threshold
+
+def centroid(image, condition):
+    h, w, _ = image.shape
+    total_x = 0
+    total_y = 0
+    count = 0
+
+    for y in range(h):
+        for x in range(w):
+            if condition(image[y, x]):
+                total_x += x
+                total_y += y
+                count += 1
+
+    return (total_x / count, total_y / count) if count > 0 else (None, None)
+
+def intersection_points(image, cx, cy, angle, condition, max_range=None):
+    h, w, _ = image.shape
+    dx = math.cos(angle)
+    dy = -math.sin(angle)
+    x, y = cx, cy
+    steps = 0
+
+    while 0 <= x < w and 0 <= y < h:
+        if condition(image[int(y), int(x)]):
+            return x, y
+        x += dx
+        y += dy
+        steps += 1
+        if max_range is not None and steps >= max_range:
+            break
+    return None, None
+
+
+
+# Load images
+circle_path = Path("stacked.tiff")
+color_path = Path("Composite.tif") #RGBでチャンネル情報は消すこと。ImageJでチャンネルが分かれて出るようなら統合する
+
+circle_stack = imread(circle_path)
+color_stack = imread(color_path)
+
+# Get the number of stacks (assuming both stacks have the same number of slices)
+num_slices = circle_stack.shape[0]
+
+# Create an empty array to store the resulting images
+result_stack = np.zeros_like(circle_stack)
+
+# Process each slice
+for slice_idx in range(num_slices):
+    circle_np = circle_stack[slice_idx]
+    color_np = color_stack[slice_idx]
+
+
+    # Task 1: Extract white color and find centroid in circle.tif
+    circle_centroid = centroid(circle_np, lambda c: np.all(c == [255, 255, 255]))
+
+
+    # Task 2: Find the centroid of white enclosed area in color.tif
+    color_centroid = centroid(color_np, in_white)
+
+
+
+    # Find intersection points for each image
+    circle_points = find_intersection_points(circle_np, *circle_centroid, lambda c: np.all(c == [0, 0, 0]))
+    color_points = find_intersection_points(color_np, *color_centroid, in_white, use_previous=True)
+
+    # Add these lines to print the number of intersection points found in each file
+    print(f"Number of intersection points found in circle.tif: {len(circle_points)}")
+    print(f"Number of intersection points found in color.tif: {len(color_points)}")
+
+    # Calculate the translation vector
+    translation_x = int(circle_centroid[0] - color_centroid[0])
+    translation_y = int(circle_centroid[1] - color_centroid[1])
+
+    # Translate the color_np image to match the centroids
+    translated_color_np = translate_image(color_np, translation_x, translation_y)
+
+    # Update the color_points by applying the translation
+    translated_color_points = color_points + np.array([translation_x, translation_y])
+
+
+    # Plot colorful lines on the circle.tif image
+    result_image = plot_colorful_lines(circle_np, translated_color_np, circle_centroid, circle_centroid, circle_points, translated_color_points)
+
+    # Save the result image to the result stack
+    result_stack[slice_idx] = result_image
+
+# Save the result stack as a 3D TIFF file
+imwrite('result_stack.tif', result_stack)
