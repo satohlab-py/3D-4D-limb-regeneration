@@ -1,0 +1,84 @@
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from matplotlib import colors
+
+root_dir = 'E:\\機械学習'
+image_paths = []
+labels = []
+annotated_images = ['AGP-HIND', 'AGP-FORE']
+annotated_indices = []
+
+# フォルダ内のJPEG画像のパスをすべて取得
+for folder, _, filenames in os.walk(root_dir):
+    for filename in filenames:
+        if filename.lower().endswith('.jpeg'):  # 小文字大文字を区別せずにマッチング
+            image_paths.append(os.path.join(folder, filename))
+            labels.append(os.path.basename(folder))  # フォルダ名をラベルとして保存
+            # ファイル名が 'AGP FORE' または 'AGP HIND' の場合、そのインデックスを保存
+            if os.path.splitext(filename)[0] in annotated_images:
+                annotated_indices.append(len(image_paths) - 1)  # 最後に追加した画像のインデックスを保存
+
+
+data = []
+# すべての画像をグレースケールで開き、1次元配列に変換し、データリストに追加
+for image_path in image_paths:
+    image = Image.open(image_path).convert('L')
+    data.append(np.array(image).flatten())
+
+# データを標準化
+data = StandardScaler().fit_transform(data)
+
+# PCAを実行
+pca = PCA(n_components=2)
+principalComponents = pca.fit_transform(data)
+
+# サブディレクトリ名をユニークな整数にマップ
+unique_labels = list(set(labels))
+label_map = {label: idx for idx, label in enumerate(unique_labels)}
+# 指定した順序でフォルダ名をリスト化
+unique_labels = ['ALM1', 'ALM2', 'ALM3', 'ALM4', 'ALM5', 'ALM6over', 'LIMB4', 'LIMB5']
+label_map = {label: idx for idx, label in enumerate(unique_labels)}
+
+# 整数にマップされたラベルを取得
+integer_labels = [label_map[label] for label in labels]
+
+# 整数ラベルとフォルダ名をマッピングしたカラーマップを作成
+cmap = colors.ListedColormap(['red', 'blue', 'green', 'cyan', 'magenta', 'yellow', 'black', 'purple'])  # 色を追加または削除できます
+norm = colors.BoundaryNorm(range(len(unique_labels)+1), cmap.N)
+
+fig, axs = plt.subplots(2, 1, figsize=(5, 10))
+
+# 元のPCAプロット
+scatter1 = axs[0].scatter(principalComponents[:, 0], principalComponents[:, 1], c=integer_labels, cmap=cmap, norm=norm)
+cbar1 = fig.colorbar(scatter1, ax=axs[0], ticks=range(len(unique_labels)))
+cbar1.set_label('Label')
+cbar1.set_ticklabels(unique_labels)  # 文字列ラベルを設定
+
+# 特別な点（'AGP-HIND' と 'AGP-FORE'）を星印でプロット
+axs[0].scatter(principalComponents[annotated_indices, 0], principalComponents[annotated_indices, 1], c='orange', cmap=cmap, norm=norm, marker='*', s=200)
+
+# Y成分を全て0に設定し、それぞれの色についてYを+5変えて、カテゴリごとに一番大きい値と一番小さい値を持つ点を結ぶ
+y_offset = np.array(integer_labels) * 5  # それぞれの色についてYを+5
+scatter2 = axs[1].scatter(principalComponents[:, 0], y_offset, c=integer_labels, cmap=cmap, norm=norm, s=50)  # sパラメータで点のサイズを指定
+cbar2 = fig.colorbar(scatter2, ax=axs[1], ticks=range(len(unique_labels)))
+cbar2.set_label('Label')
+cbar2.set_ticklabels(unique_labels)  # 文字列ラベルを設定
+
+
+
+# カテゴリごとに一番大きい値と一番小さい値を持つ点を結ぶ
+for idx, label in enumerate(unique_labels):
+    data_idx = [i for i, l in enumerate(integer_labels) if l == idx]  # 同じカテゴリのデータのインデックスを取得
+    x_values = principalComponents[data_idx, 0]
+    y_values = y_offset[data_idx]
+    axs[1].plot([np.min(x_values), np.max(x_values)], [np.min(y_values), np.max(y_values)], color=cmap(idx), linewidth=2)  # 線の太さを2に指定
+
+# 特別な点（'AGP-HIND' と 'AGP-FORE'）を星印でプロット
+axs[1].scatter(principalComponents[annotated_indices, 0], y_offset[annotated_indices], c='orange', cmap=cmap, norm=norm, marker='*', s=200, zorder=3)
+
+plt.tight_layout()
+plt.show()
