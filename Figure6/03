@@ -1,0 +1,34 @@
+import tifffile
+import numpy as np
+
+# 赤色のみを抽出する関数
+def extract_red_only(data, red_threshold, other_threshold):
+    # 赤色成分がしきい値以上であり、かつ他の成分がしきい値以下のピクセルを赤色と見なします。
+    # 3Dデータを処理するためには、全てのZスライスに対してこの操作を適用します。
+    red_only = np.zeros_like(data)
+    for z in range(data.shape[0]):  # Z軸に沿ってループ
+        red_channel = data[z, :, :, 0]
+        green_channel = data[z, :, :, 1]
+        blue_channel = data[z, :, :, 2]
+        
+        # 赤色チャンネルが赤しきい値を超えていて、かつ緑と青のチャンネルが
+        # 他のしきい値以下であるピクセルを真とするブールマスクを作成します。
+        mask = (red_channel > red_threshold) & (green_channel <= other_threshold) & (blue_channel <= other_threshold)
+        red_only[z, :, :, 0] = mask * red_channel  # 赤チャンネルのデータをマスクで適用
+        # 緑と青のチャンネルは0のまま（黒色）
+    
+    return red_only
+
+# 赤色のしきい値と他の色のしきい値を設定します
+red_threshold = 50
+other_threshold = 15
+
+# TIFFファイルを読み込みます
+with tifffile.TiffFile('result_stack.tif') as tif:
+    data = tif.asarray()
+
+    # 赤色のみを抽出します
+    red_only_data = extract_red_only(data, red_threshold, other_threshold)
+
+    # 変更されたデータで新しいTIFFファイルを書き出します
+    tifffile.imwrite('Redextracted.tif', red_only_data)
