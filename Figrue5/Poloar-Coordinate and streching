@@ -1,0 +1,138 @@
+import cv2
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Create a new folder for transformed images
+output_folder = 'transformed'
+if not os.path.exists(output_folder):
+    os.makedirs(output_folder)
+
+# Get the list of all jpg files in the current folder
+jpg_files = [f for f in os.listdir() if f.endswith('.jpeg')]
+
+# Iterate through each jpg file
+for jpg_file in jpg_files:
+    # Load the image
+    img_path = jpg_file
+    img = cv2.imread(img_path)
+
+    # Check if the image is loaded correctly
+    if img is None:
+        print(f"Error loading {jpg_file}")
+        continue
+
+    # Convert from BGR to RGB to correct the color inversion issue
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    # Convert to grayscale and threshold to detect white contours
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)  
+    _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY)
+
+    # Detect the contours of the white boundary
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    largest_contour = max(contours, key=cv2.contourArea)
+
+    # Calculate the centroid of the largest contour
+    M = cv2.moments(largest_contour)
+    if M["m00"] != 0:
+        centroid_x = int(M["m10"] / M["m00"])
+        centroid_y = int(M["m01"] / M["m00"])
+    else:
+        print(f"Centroid could not be calculated for {jpg_file}")
+        continue
+
+    # Function to extract color information along a specific angle (theta) and radius
+    def get_color_at_angle(img, center, angle_degrees, radius):
+        angle_radians = np.radians(angle_degrees)
+        colors = []
+        for r in range(1, radius):  # Sample along the radius
+            x = int(center[0] + r * np.cos(angle_radians))
+            y = int(center[1] - r * np.sin(angle_radians))
+            if 0 <= x < img.shape[1] and 0 <= y < img.shape[0]:
+                colors.append(img[y, x])
+        return colors
+
+    # Extract color information for θ = 0 to 359 degrees
+    theta_range = range(0, 360)
+    radius = 200
+
+    # Function to extract and accumulate color information across a range of angles
+    def get_color_map_along_theta_range(img, center, theta_range, radius):
+        color_map = np.zeros((radius, len(theta_range), 3), dtype=np.uint8)  # Create a color map
+
+        for i, theta in enumerate(theta_range):
+            color_data = get_color_at_angle(img, center, theta, radius)
+            for r, color in enumerate(color_data):
+                color_map[r, i, :] = color  # Fill the color map with actual RGB values
+
+        return color_map
+
+    # Function to find the first white pixel in each column (angle)
+    def find_first_white_pixel(color_map, threshold=(240, 240, 240)):
+        white_positions = []
+        for x in range(color_map.shape[1]):  # Loop through each column (angle)
+            for y in range(color_map.shape[0]):  # Loop through each row (radius)
+                pixel = color_map[y, x]
+                # Check if the pixel is in the white range
+                if (threshold[0] <= pixel[0] <= 255 and
+                    threshold[1] <= pixel[1] <= 255 and
+                    threshold[2] <= pixel[2] <= 255):
+                    white_positions.append(y)  # Add the Y position where white is first found
+                    break
+            else:
+                white_positions.append(0)  # If no white pixel is found, append 0
+        return white_positions
+
+    # Function to stretch the color map based on the first white pixel Y(A)
+    def stretch_color_map(color_map, white_positions):
+        stretched_map = np.zeros_like(color_map)
+        for x in range(color_map.shape[1]):  # Loop through each column (angle)
+            white_pos = white_positions[x]
+            if white_pos > 0:
+                # Perform stretching, ensuring new_y does not exceed the map's boundaries
+                for y in range(color_map.shape[0]):
+                    new_y = int((y / white_pos) * (color_map.shape[0] - 1))
+                    new_y = min(new_y, color_map.shape[0] - 1)  # Ensure new_y is within bounds
+                    stretched_map[new_y, x] = color_map[y, x]
+            else:
+                stretched_map[:, x] = color_map[:, x]  # If no white, keep original column
+        return stretched_map
+
+    # Function to fill black holes (RGB = 0, 0, 0) with the next non-black pixel's color
+    def fill_black_holes(color_map, black_threshold=(0, 0, 0)):
+        filled_map = color_map.copy()  # Copy the color map to avoid modifying the original
+        for x in range(filled_map.shape[1]):  # Loop through each column (angle)
+            for y in range(filled_map.shape[0]):  # Loop through each row (radius)
+                pixel = filled_map[y, x]
+                # If the pixel is black (hole)
+                if (pixel[0] == black_threshold[0] and
+                    pixel[1] == black_threshold[1] and
+                    pixel[2] == black_threshold[2]):
+                    # Look for the next non-black pixel below
+                    for yy in range(y+1, filled_map.shape[0]):
+                        next_pixel = filled_map[yy, x]
+                        if (next_pixel[0] != black_threshold[0] or
+                            next_pixel[1] != black_threshold[1] or
+                            next_pixel[2] != black_threshold[2]):
+                            filled_map[y, x] = next_pixel  # Replace with the non-black pixel's color
+                            break
+        return filled_map
+
+    # Get the color map for θ = 0 to 359 degrees
+    color_map = get_color_map_along_theta_range(img, (centroid_x, centroid_y), theta_range, radius)
+
+    # Find the first white pixel positions Y(A)
+    white_positions = find_first_white_pixel(color_map)
+
+    # Stretch the color map based on the first white pixel Y(A)
+    stretched_color_map = stretch_color_map(color_map, white_positions)
+
+    # Apply black hole filling to the stretched color map
+    filled_color_map = fill_black_holes(stretched_color_map)
+
+    # Save the final filled color map (as a sample image)
+    filled_color_map_bgr = cv2.cvtColor(filled_color_map, cv2.COLOR_RGB2BGR)  # Convert back to BGR
+    output_path = os.path.join(output_folder, jpg_file)
+    cv2.imwrite(output_path, filled_color_map_bgr)
+    print(f"Processed and saved: {jpg_file}")
